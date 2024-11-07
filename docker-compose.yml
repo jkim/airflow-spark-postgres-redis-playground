@@ -1,0 +1,102 @@
+services:
+  postgres:
+    image: postgres:13
+    env_file:
+      - .env
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "${POSTGRES_USER}"]
+      interval: 5s
+      retries: 5
+    networks:
+      - airflow-spark-network
+
+  redis:
+    image: redis:6
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 30s
+      retries: 50
+    networks:
+      - airflow-spark-network
+
+  spark-master:
+    build:
+      context: .
+      dockerfile: Dockerfile-spark-worker  # Ensure this matches your Dockerfile's name
+    image: spark-custom:latest
+    environment:
+      - SPARK_MODE=master
+    ports:
+      - "8080:8080"  # Spark Master UI
+      - "7077:7077"  # Spark Master port
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+    networks:
+      - airflow-spark-network
+
+  spark-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile-spark-worker  # Ensure this matches your Dockerfile's name
+    image: spark-custom:latest
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://spark-master:7077
+    ports:
+      - "8082:8081"  # Map the worker UI to 8082 on the host
+    depends_on:
+      - spark-master
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081"]
+      interval: 5s
+      timeout: 10s
+      retries: 5
+    networks:
+      - airflow-spark-network
+
+  airflow:
+    build:
+      context: .
+      dockerfile: Dockerfile  # Ensure this matches your Dockerfile's name
+    image: airflow-custom:latest
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      spark-master:
+        condition: service_healthy
+      spark-worker:
+        condition: service_healthy
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./spark:/opt/airflow/spark
+    ports:
+      - "8081:8080"  # Airflow UI
+    command: >
+      bash -c "airflow db init &&
+               airflow users create --username ${AIRFLOW_ADMIN_USERNAME} --password ${AIRFLOW_ADMIN_PASSWORD} --firstname Admin --lastname User --role Admin --email ${AIRFLOW_ADMIN_EMAIL} ||
+               echo 'User already exists' &&
+               airflow scheduler &
+               airflow webserver"
+    networks:
+      - airflow-spark-network
+
+volumes:
+  postgres_data:
+
+networks:
+  airflow-spark-network:
+    driver: bridge
